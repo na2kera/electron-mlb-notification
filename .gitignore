@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Environment variables
+.env
+.env.*
+
+# TypeScript
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Caches and temporary files
+.cache/
+.esbuild/
+.verdaccio/
+coverage/
+tmp/
+
+# Electron artifacts
+*.asar
+release/
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
