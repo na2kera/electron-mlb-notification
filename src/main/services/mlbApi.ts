@@ -87,8 +87,26 @@ interface GameFeedResponse {
   };
 }
 
+export class MLBApiHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly statusText: string,
+    public readonly url: string,
+    public readonly body?: string
+  ) {
+    super(`MLB API error: ${status} ${statusText}`);
+    this.name = 'MLBApiHttpError';
+  }
+}
+
+function joinUrl(base: string, pathname: string): URL {
+  const normalizedBase = base.endsWith('/') ? base : base + '/';
+  const normalizedPath = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+  return new URL(normalizedPath, normalizedBase);
+}
+
 function buildUrl(pathname: string, options: FetchOptions = {}) {
-  const url = new URL(pathname, BASE_URL);
+  const url = joinUrl(BASE_URL, pathname);
   if (options.query) {
     Object.entries(options.query).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
@@ -183,6 +201,7 @@ export class MLBStatsApi {
     });
 
     try {
+      logger.debug('MLB schedule request', { teamId, dateIso, url: url.toString() });
       const json = await this.fetchJson<ScheduleResponse>(url);
       const games = json.dates.flatMap((date) => date.games);
       return games.map((game) => ({
@@ -194,14 +213,25 @@ export class MLBStatsApi {
         awayTeam: this.mapTeam(game.teams.away.team),
       }));
     } catch (error) {
+      if (error instanceof MLBApiHttpError) {
+        logger.warn('Failed to fetch team schedule', {
+          teamId,
+          dateIso,
+          status: error.status,
+          statusText: error.statusText,
+          url: error.url,
+          body: error.body,
+        });
+        throw error;
+      }
       logger.warn('Failed to fetch team schedule', { teamId, dateIso, error });
-      return [];
+      throw error;
     }
   }
 
   async getGameFeed(gamePk: number): Promise<LinescoreSummary | null> {
     try {
-      const url = new URL(`/game/${gamePk}/feed/live`, LIVE_FEED_BASE_URL);
+      const url = joinUrl(LIVE_FEED_BASE_URL, `game/${gamePk}/feed/live`);
       const json = await this.fetchJson<GameFeedResponse>(url);
       const linescore = json.liveData.linescore;
       if (!linescore) {
@@ -235,10 +265,14 @@ export class MLBStatsApi {
     try {
       const response = await this.fetchImpl(url, {
         signal: options.signal ?? controller.signal,
+        headers: {
+          'User-Agent': 'MLB Score Notifier (Electron App)',
+        },
       });
 
       if (!response.ok) {
-        throw new Error(`MLB API error: ${response.status} ${response.statusText}`);
+        const body = await response.text().catch(() => undefined);
+        throw new MLBApiHttpError(response.status, response.statusText, url.toString(), body);
       }
 
       return (await response.json()) as T;

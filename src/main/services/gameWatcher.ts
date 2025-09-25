@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { MLBStatsApi } from './mlbApi';
+import { MLBStatsApi, MLBApiHttpError } from './mlbApi';
 import { logger } from '../logger';
 import type {
   GameStatusPayload,
@@ -39,6 +39,34 @@ export class GameWatcher extends EventEmitter {
   private state: WatcherState;
   private cache = new Map<string, GameCacheEntry>();
   private statusByTeam = new Map<number, GameStatusPayload>();
+
+  private static readonly MLB_TIMEZONE = 'America/New_York';
+
+  private static getCurrentMlbDateIso(now = new Date()): string {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: GameWatcher.MLB_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const parts = formatter.formatToParts(now);
+    const year = parts.find((part) => part.type === 'year')?.value;
+    const month = parts.find((part) => part.type === 'month')?.value;
+    const day = parts.find((part) => part.type === 'day')?.value;
+
+    if (!year || !month || !day) {
+      logger.warn('Falling back to UTC date for MLB schedule due to missing formatter parts');
+      return now.toISOString().slice(0, 10);
+    }
+
+    return `${year}-${month}-${day}`;
+  }
+
+  private static getMlbDateIsoWithOffset(offsetDays: number, base = new Date()): string {
+    const shifted = new Date(base.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+    return GameWatcher.getCurrentMlbDateIso(shifted);
+  }
 
   constructor(settings: Settings, api: MLBStatsApi = new MLBStatsApi()) {
     super();
@@ -94,8 +122,7 @@ export class GameWatcher extends EventEmitter {
     logger.debug('Watcher tick');
 
     try {
-      const now = new Date();
-      const dateIso = now.toISOString().slice(0, 10);
+      const dateIso = GameWatcher.getCurrentMlbDateIso();
 
       const teamQueue = [...this.settings.teams];
       const limit = 2;
@@ -118,7 +145,31 @@ export class GameWatcher extends EventEmitter {
 
   private async processTeam(team: TeamSelection, dateIso: string) {
     try {
-      const schedule = await this.api.getTeamSchedule(team.teamId, dateIso);
+      logger.debug('Fetching team schedule', { teamId: team.teamId, dateIso });
+      let schedule = await this.api.getTeamSchedule(team.teamId, dateIso);
+      // Fallback: 404 or empty results → try previous ET date (overnight/live spillover)
+      if (schedule.length === 0) {
+        const prevDateIso = GameWatcher.getMlbDateIsoWithOffset(-1);
+        try {
+          logger.debug('Primary date empty, trying previous date', { teamId: team.teamId, prevDateIso });
+          schedule = await this.api.getTeamSchedule(team.teamId, prevDateIso);
+          if (schedule.length) {
+            logger.debug('Using previous date schedule', { teamId: team.teamId, prevDateIso, total: schedule.length });
+          }
+        } catch (err) {
+          if (err instanceof MLBApiHttpError && err.status === 404) {
+            logger.debug('Previous date also returned 404', { teamId: team.teamId, prevDateIso });
+          } else {
+            throw err;
+          }
+        }
+      }
+      logger.debug('Schedule response summary', {
+        teamId: team.teamId,
+        dateIso,
+        total: schedule.length,
+        states: schedule.map((game) => game.abstractState),
+      });
       const liveGames = schedule.filter((game) => game.abstractState === 'Live');
       const upcoming = schedule.filter((game) => game.abstractState === 'Preview' || game.abstractState === 'Pre-Game');
       const finalGames = schedule.filter((game) => game.abstractState === 'Final');
